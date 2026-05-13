@@ -1,9 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:network_info_plus/network_info_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
-import 'package:wifi_iot/wifi_iot.dart'; 
+import 'package:wifi_iot/wifi_iot.dart';
 import 'dart:async';
 import 'dart:io';
+import 'dart:math';
 
 void main() {
   runApp(const WifiAnalyzerApp());
@@ -19,7 +20,7 @@ class WifiAnalyzerApp extends StatelessWidget {
       theme: ThemeData(
         brightness: Brightness.dark,
         useMaterial3: true,
-        colorSchemeSeed: Colors.cyanAccent,
+        colorSchemeSeed: Colors.cyan,
       ),
       home: const WifiHomeScreen(),
     );
@@ -36,14 +37,14 @@ class WifiHomeScreen extends StatefulWidget {
 class _WifiHomeScreenState extends State<WifiHomeScreen> {
   final info = NetworkInfo();
   Timer? _timer;
-  
+
   String _ssid = "Memindai...";
   String _ip = "0.0.0.0";
   String _bssid = "00:00:00:00:00";
   String _ping = "N/A";
-  int _signalStrength = 0;
+  int _signalStrength = -100;
   String _frequency = "N/A";
-  bool _isLoading = false;
+  String _distance = "N/A";
 
   @override
   void initState() {
@@ -58,15 +59,22 @@ class _WifiHomeScreenState extends State<WifiHomeScreen> {
   }
 
   Future<void> _initApp() async {
-    // Meminta izin lokasi (Wajib untuk WiFi di Android)
+    // Meminta izin lokasi & perangkat sekitar (Wajib untuk Android 12+)
     await [
       Permission.location,
       Permission.nearbyWifiDevices,
     ].request();
-    
+
     _fetchNetworkData();
-    // Refresh otomatis tiap 3 detik
-    _timer = Timer.periodic(const Duration(seconds: 3), (timer) => _fetchNetworkData());
+    // Refresh data setiap 2 detik agar monitoring terasa "Live"
+    _timer = Timer.periodic(const Duration(seconds: 2), (timer) => _fetchNetworkData());
+  }
+
+  // Rumus estimasi jarak berdasarkan RSSI dan Frekuensi
+  String _calculateDistance(int rssi, int freq) {
+    if (rssi == 0 || freq == 0) return "N/A";
+    double exp = (27.55 - (20 * log(freq) / ln10) + rssi.abs()) / 20.0;
+    return "${pow(10.0, exp).toStringAsFixed(1)} m";
   }
 
   Future<void> _fetchNetworkData() async {
@@ -74,38 +82,34 @@ class _WifiHomeScreenState extends State<WifiHomeScreen> {
       final ssid = await info.getWifiName();
       final ip = await info.getWifiIP();
       final bssid = await info.getWifiBSSID();
-
-      int rssi = 0;
+      int rssi = -100;
       int freq = 0;
 
-      // Hanya jalankan wifi_iot di Android fisik
       if (Platform.isAndroid) {
-        rssi = await WiFiForIoTPlugin.getCurrentSignalStrength() ?? 0;
+        rssi = await WiFiForIoTPlugin.getCurrentSignalStrength() ?? -100;
         freq = await WiFiForIoTPlugin.getFrequency() ?? 0;
       }
 
-      String pingResult = "Timeout";
+      // Test Ping ke DNS Google
+      String pingVal = "Offline";
       try {
-        final stopwatch = Stopwatch()..start();
-        final result = await InternetAddress.lookup('8.8.8.8')
-            .timeout(const Duration(seconds: 1));
-        if (result.isNotEmpty) {
-          stopwatch.stop();
-          pingResult = "${stopwatch.elapsedMilliseconds} ms";
+        final sw = Stopwatch()..start();
+        final res = await InternetAddress.lookup('8.8.8.8').timeout(const Duration(seconds: 1));
+        if (res.isNotEmpty) {
+          sw.stop();
+          pingVal = "${sw.elapsedMilliseconds} ms";
         }
-      } catch (_) {
-        pingResult = "Offline";
-      }
+      } catch (_) {}
 
       if (!mounted) return;
-
       setState(() {
         _ssid = (ssid ?? "Tidak Terhubung").replaceAll('"', '');
         _ip = ip ?? "0.0.0.0";
-        _bssid = bssid ?? "Unknown BSSID";
-        _ping = pingResult;
+        _bssid = bssid ?? "Tidak Terdeteksi";
         _signalStrength = rssi;
         _frequency = freq > 0 ? "${(freq / 1000).toStringAsFixed(1)} GHz" : "N/A";
+        _distance = _calculateDistance(rssi, freq);
+        _ping = pingVal;
       });
     } catch (e) {
       debugPrint("Error: $e");
@@ -123,55 +127,71 @@ class _WifiHomeScreenState extends State<WifiHomeScreen> {
           style: TextStyle(letterSpacing: 2, fontWeight: FontWeight.bold, fontSize: 16)),
         centerTitle: true,
         backgroundColor: Colors.transparent,
+        elevation: 0,
       ),
       body: SingleChildScrollView(
         padding: const EdgeInsets.all(20),
         child: Column(
           children: [
-            _buildMainCard(isConnected),
-            const SizedBox(height: 20),
+            // KARTU SINYAL UTAMA
+            _buildHeaderCard(isConnected),
+            const SizedBox(height: 25),
+            
+            // GRID STATISTIK (Ping & Sinyal)
             Row(
               children: [
-                Expanded(child: _buildStatBox("Ping", _ping, Icons.speed, Colors.orange)),
+                Expanded(child: _buildStatBox("Ping", _ping, Icons.bolt, Colors.orangeAccent)),
                 const SizedBox(width: 15),
-                Expanded(child: _buildStatBox("Signal", "$_signalStrength dBm", Icons.signal_wifi_4_bar, Colors.green)),
+                Expanded(child: _buildStatBox("Signal", "$_signalStrength dBm", Icons.wifi_tethering, _getSignalColor())),
               ],
             ),
             const SizedBox(height: 15),
+            
+            // GRID STATISTIK (Frekuensi & Jarak)
             Row(
               children: [
                 Expanded(child: _buildStatBox("Freq", _frequency, Icons.radar, Colors.purpleAccent)),
                 const SizedBox(width: 15),
-                Expanded(child: _buildStatBox("Security", "WPA2/3", Icons.lock, Colors.blue)),
+                Expanded(child: _buildStatBox("Est. Distance", _distance, Icons.straighten, Colors.redAccent)),
               ],
             ),
-            const SizedBox(height: 20),
-            _buildDetailTile("IP Address", _ip, Icons.dns),
-            _buildDetailTile("MAC Address", _bssid, Icons.fingerprint),
+            const SizedBox(height: 25),
+
+            // LIST DETAIL JARINGAN
+            _buildDetailTile("IP Address", _ip, Icons.lan_outlined),
+            _buildDetailTile("MAC / BSSID", _bssid, Icons.fingerprint),
+            _buildDetailTile("Gateway", _ip != "0.0.0.0" ? "${_ip.substring(0, _ip.lastIndexOf('.'))}.1" : "N/A", Icons.router_outlined),
+            
             const SizedBox(height: 30),
-            const Text("Live Monitoring Active", style: TextStyle(color: Colors.white24, fontSize: 10)),
+            const Text("DATA UPDATED EVERY 2 SECONDS", 
+              style: TextStyle(color: Colors.white24, fontSize: 10, letterSpacing: 1)),
           ],
         ),
       ),
     );
   }
 
-  Widget _buildMainCard(bool isConnected) {
+  Widget _buildHeaderCard(bool isConnected) {
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.all(30),
       decoration: BoxDecoration(
         gradient: LinearGradient(
-          colors: isConnected ? [Colors.cyan, Colors.blueAccent] : [Colors.grey.shade800, Colors.black],
+          colors: isConnected 
+            ? [Colors.cyan.shade700, Colors.blue.shade900] 
+            : [Colors.grey.shade900, Colors.black],
         ),
         borderRadius: BorderRadius.circular(30),
+        boxShadow: [BoxShadow(color: Colors.cyan.withOpacity(0.2), blurRadius: 20)],
       ),
       child: Column(
         children: [
           Icon(isConnected ? Icons.wifi : Icons.wifi_off, size: 60, color: Colors.white),
           const SizedBox(height: 15),
-          Text(_ssid, style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
-          Text(isConnected ? "CONNECTED" : "DISCONNECTED", style: const TextStyle(fontSize: 10, letterSpacing: 2)),
+          Text(_ssid, style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
+          const SizedBox(height: 5),
+          Text(isConnected ? "KONEKSI STABIL" : "TERPUTUS", 
+            style: const TextStyle(fontSize: 10, letterSpacing: 2, color: Colors.white70)),
         ],
       ),
     );
@@ -179,19 +199,19 @@ class _WifiHomeScreenState extends State<WifiHomeScreen> {
 
   Widget _buildStatBox(String label, String value, IconData icon, Color color) {
     return Container(
-      padding: const EdgeInsets.all(15),
+      padding: const EdgeInsets.all(18),
       decoration: BoxDecoration(
         color: Colors.white.withOpacity(0.05),
-        borderRadius: BorderRadius.circular(20),
+        borderRadius: BorderRadius.circular(22),
         border: Border.all(color: Colors.white10),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Icon(icon, color: color, size: 20),
-          const SizedBox(height: 10),
+          Icon(icon, color: color, size: 24),
+          const SizedBox(height: 12),
           Text(label, style: const TextStyle(color: Colors.grey, fontSize: 11)),
-          Text(value, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
+          Text(value, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
         ],
       ),
     );
@@ -199,25 +219,31 @@ class _WifiHomeScreenState extends State<WifiHomeScreen> {
 
   Widget _buildDetailTile(String title, String value, IconData icon) {
     return Container(
-      margin: const EdgeInsets.only(bottom: 10),
-      padding: const EdgeInsets.all(15),
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.all(18),
       decoration: BoxDecoration(
-        color: Colors.white.withOpacity(0.02),
-        borderRadius: BorderRadius.circular(15),
+        color: Colors.white.withOpacity(0.03),
+        borderRadius: BorderRadius.circular(18),
       ),
       child: Row(
         children: [
-          Icon(icon, color: Colors.cyan, size: 20),
-          const SizedBox(width: 15),
+          Icon(icon, color: Colors.cyanAccent, size: 22),
+          const SizedBox(width: 18),
           Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(title, style: const TextStyle(color: Colors.grey, fontSize: 10)),
-              Text(value, style: const TextStyle(fontWeight: FontWeight.bold)),
+              Text(value, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
             ],
           )
         ],
       ),
     );
+  }
+
+  Color _getSignalColor() {
+    if (_signalStrength >= -60) return Colors.greenAccent;
+    if (_signalStrength >= -80) return Colors.orangeAccent;
+    return Colors.redAccent;
   }
 }
