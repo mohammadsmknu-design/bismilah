@@ -13,6 +13,7 @@ dependencies:
   permission_handler: ^11.3.0
   wifi_iot: ^0.3.19
   cupertino_icons: ^1.0.6
+  fl_chart: ^1.2.0
 
 dev_dependencies:
   flutter_test:

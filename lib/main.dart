@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:network_info_plus/network_info_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:wifi_iot/wifi_iot.dart';
+import 'package:fl_chart/fl_chart.dart'; 
 import 'dart:async';
 import 'dart:io';
 import 'dart:math';
@@ -45,6 +46,10 @@ class _WifiHomeScreenState extends State<WifiHomeScreen> {
   int _signalStrength = -100;
   String _frequency = "N/A";
   String _distance = "N/A";
+  bool _isPermissionGranted = false;
+
+  List<FlSpot> _signalHistory = [];
+  int _timerCounter = 0;
 
   @override
   void initState() {
@@ -59,18 +64,53 @@ class _WifiHomeScreenState extends State<WifiHomeScreen> {
   }
 
   Future<void> _initApp() async {
-    // Meminta izin lokasi & perangkat sekitar (Wajib untuk Android 12+)
-    await [
+    Map<Permission, PermissionStatus> statuses = await [
       Permission.location,
       Permission.nearbyWifiDevices,
     ].request();
 
-    _fetchNetworkData();
-    // Refresh data setiap 2 detik agar monitoring terasa "Live"
-    _timer = Timer.periodic(const Duration(seconds: 2), (timer) => _fetchNetworkData());
+    if (statuses[Permission.location]?.isGranted == true) {
+      setState(() {
+        _isPermissionGranted = true;
+      });
+      _fetchNetworkData();
+      _timer = Timer.periodic(const Duration(seconds: 2), (timer) => _fetchNetworkData());
+    } else {
+      setState(() {
+        _isPermissionGranted = false;
+        _ssid = "Butuh Izin Lokasi";
+      });
+      _showPermissionDialog();
+    }
   }
 
-  // Rumus estimasi jarak berdasarkan RSSI dan Frekuensi
+  void _showPermissionDialog() {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => AlertDialog(
+        title: const Text("Izin Diperlukan"),
+        content: const Text("Aplikasi ini membutuhkan izin Lokasi dan Perangkat Sekitar untuk membaca data Wi-Fi secara akurat."),
+        actions: [
+          TextButton(
+            onPressed: () {
+              Navigator.pop(context);
+              openAppSettings();
+            },
+            child: const Text("Buka Pengaturan"),
+          ),
+          TextButton(
+            onPressed: () {
+              Navigator.pop(context);
+              _initApp();
+            },
+            child: const Text("Coba Lagi"),
+          ),
+        ],
+      ),
+    );
+  }
+
   String _calculateDistance(int rssi, int freq) {
     if (rssi == 0 || freq == 0) return "N/A";
     double exp = (27.55 - (20 * log(freq) / ln10) + rssi.abs()) / 20.0;
@@ -90,7 +130,6 @@ class _WifiHomeScreenState extends State<WifiHomeScreen> {
         freq = await WiFiForIoTPlugin.getFrequency() ?? 0;
       }
 
-      // Test Ping ke DNS Google
       String pingVal = "Offline";
       try {
         final sw = Stopwatch()..start();
@@ -103,13 +142,25 @@ class _WifiHomeScreenState extends State<WifiHomeScreen> {
 
       if (!mounted) return;
       setState(() {
-        _ssid = (ssid ?? "Tidak Terhubung").replaceAll('"', '');
+        if (ssid == "<unknown ssid>") {
+          _ssid = "Aktifkan GPS HP";
+        } else {
+          _ssid = (ssid ?? "Tidak Terhubung").replaceAll('"', '');
+        }
+        
         _ip = ip ?? "0.0.0.0";
         _bssid = bssid ?? "Tidak Terdeteksi";
         _signalStrength = rssi;
         _frequency = freq > 0 ? "${(freq / 1000).toStringAsFixed(1)} GHz" : "N/A";
         _distance = _calculateDistance(rssi, freq);
         _ping = pingVal;
+
+        _timerCounter++;
+        _signalHistory.add(FlSpot(_timerCounter.toDouble(), rssi.toDouble()));
+        
+        if (_signalHistory.length > 10) {
+          _signalHistory.removeAt(0);
+        }
       });
     } catch (e) {
       debugPrint("Error: $e");
@@ -118,7 +169,7 @@ class _WifiHomeScreenState extends State<WifiHomeScreen> {
 
   @override
   Widget build(BuildContext context) {
-    bool isConnected = _ssid != "Tidak Terhubung" && _ssid != "Memindai...";
+    bool isConnected = _ssid != "Tidak Terhubung" && _ssid != "Memindai..." && _ssid != "Butuh Izin Lokasi" && _ssid != "Aktifkan GPS HP";
 
     return Scaffold(
       backgroundColor: const Color(0xFF0A0E21),
@@ -129,46 +180,128 @@ class _WifiHomeScreenState extends State<WifiHomeScreen> {
         backgroundColor: Colors.transparent,
         elevation: 0,
       ),
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.all(20),
-        child: Column(
-          children: [
-            // KARTU SINYAL UTAMA
-            _buildHeaderCard(isConnected),
-            const SizedBox(height: 25),
-            
-            // GRID STATISTIK (Ping & Sinyal)
-            Row(
-              children: [
-                Expanded(child: _buildStatBox("Ping", _ping, Icons.bolt, Colors.orangeAccent)),
-                const SizedBox(width: 15),
-                Expanded(child: _buildStatBox("Signal", "$_signalStrength dBm", Icons.wifi_tethering, _getSignalColor())),
-              ],
-            ),
-            const SizedBox(height: 15),
-            
-            // GRID STATISTIK (Frekuensi & Jarak)
-            Row(
-              children: [
-                Expanded(child: _buildStatBox("Freq", _frequency, Icons.radar, Colors.purpleAccent)),
-                const SizedBox(width: 15),
-                Expanded(child: _buildStatBox("Est. Distance", _distance, Icons.straighten, Colors.redAccent)),
-              ],
-            ),
-            const SizedBox(height: 25),
-
-            // LIST DETAIL JARINGAN
-            _buildDetailTile("IP Address", _ip, Icons.lan_outlined),
-            _buildDetailTile("MAC / BSSID", _bssid, Icons.fingerprint),
-            _buildDetailTile("Gateway", _ip != "0.0.0.0" ? "${_ip.substring(0, _ip.lastIndexOf('.'))}.1" : "N/A", Icons.router_outlined),
-            
-            const SizedBox(height: 30),
-            const Text("DATA UPDATED EVERY 2 SECONDS", 
-              style: TextStyle(color: Colors.white24, fontSize: 10, letterSpacing: 1)),
-          ],
+      body: RefreshIndicator(
+        onRefresh: _fetchNetworkData,
+        child: SingleChildScrollView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            children: [
+              _buildHeaderCard(isConnected),
+              const SizedBox(height: 20),
+              
+              if (isConnected) _buildChartCard(),
+              if (isConnected) const SizedBox(height: 20),
+              
+              Row(
+                children: [
+                  Expanded(child: _buildStatBox("Ping", _ping, Icons.bolt, Colors.orangeAccent)),
+                  const SizedBox(width: 15),
+                  Expanded(child: _buildStatBox("Signal", "$_signalStrength dBm", Icons.wifi_tethering, _getSignalColor())),
+                ],
+              ),
+              const SizedBox(height: 15),
+              
+              Row(
+                children: [
+                  Expanded(child: _buildStatBox("Freq", _frequency, Icons.radar, Colors.purpleAccent)),
+                  const SizedBox(width: 15),
+                  Expanded(child: _buildStatBox("Est. Distance", _distance, Icons.straighten, Colors.redAccent)),
+                ],
+              ),
+              const SizedBox(height: 25),
+    
+              _buildDetailTile("IP Address", _ip, Icons.lan_outlined),
+              _buildDetailTile("MAC / BSSID", _bssid, Icons.fingerprint),
+              _buildDetailTile("Gateway", _ip != "0.0.0.0" ? "${_ip.substring(0, _ip.lastIndexOf('.'))}.1" : "N/A", Icons.router_outlined),
+              
+              const SizedBox(height: 20),
+              
+              if (!_isPermissionGranted)
+                ElevatedButton.icon(
+                  onPressed: _initApp,
+                  icon: const Icon(Icons.security),
+                  label: const Text("Berikan Izin Manual"),
+                  style: ElevatedButton.styleFrom(backgroundColor: Colors.cyan.shade800, foregroundColor: Colors.white),
+                ),
+                
+              const SizedBox(height: 10),
+              const Text("DATA UPDATED EVERY 2 SECONDS", 
+                style: TextStyle(color: Colors.white24, fontSize: 10, letterSpacing: 1)),
+            ],
+          ),
         ),
       ),
     );
+  }
+
+  Widget _buildChartCard() {
+    return Container(
+      height: 180,
+      width: double.infinity,
+      padding: const EdgeInsets.all(15),
+      decoration: BoxDecoration(
+        color: Colors.white.withOpacity(0.03),
+        borderRadius: BorderRadius.circular(22),
+        border: Border.all(color: Colors.white10),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text("Signal Stability (dBm)", style: TextStyle(color: Colors.grey, fontSize: 11, fontWeight: FontWeight.bold)),
+          const SizedBox(height: 15),
+          Expanded(
+            child: _signalHistory.isEmpty
+                ? const Center(child: CircularProgressIndicator())
+                : LineChart(
+                    LineChartData(
+                      gridData: const FlGridData(show: false),
+                      titlesData: FlTitlesData(
+                        show: true,
+                        rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                        topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                        bottomTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                        leftTitles: AxisTitles(
+                          sideTitles: SideTitles(
+                            showTitles: true,
+                            reservedSize: 30,
+                            getTitlesWidget: _leftTitleWidgets,
+                          ),
+                        ),
+                      ),
+                      borderData: FlBorderData(show: false),
+                      minY: -100,
+                      maxY: -30,
+                      lineBarsData: [
+                        LineChartBarData(
+                          spots: _signalHistory,
+                          isCurved: true,
+                          color: Colors.cyanAccent,
+                          barWidth: 3,
+                          isStrokeCapRound: true,
+                          dotData: const FlDotData(show: false),
+                          belowBarData: BarAreaData(
+                            show: true,
+                            color: Colors.cyan.withOpacity(0.1),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  static Widget _leftTitleWidgets(double value, TitleMeta meta) {
+    if (value == -30 || value == -60 || value == -90) {
+      return Text(
+        value.toInt().toString(),
+        style: const TextStyle(color: Colors.white30, fontSize: 10),
+      );
+    }
+    return Container();
   }
 
   Widget _buildHeaderCard(bool isConnected) {
@@ -188,9 +321,9 @@ class _WifiHomeScreenState extends State<WifiHomeScreen> {
         children: [
           Icon(isConnected ? Icons.wifi : Icons.wifi_off, size: 60, color: Colors.white),
           const SizedBox(height: 15),
-          Text(_ssid, style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
+          Text(_ssid, style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold), textAlign: TextAlign.center),
           const SizedBox(height: 5),
-          Text(isConnected ? "KONEKSI STABIL" : "TERPUTUS", 
+          Text(isConnected ? "KONEKSI STABIL" : "PERIKSA PERANGKAT", 
             style: const TextStyle(fontSize: 10, letterSpacing: 2, color: Colors.white70)),
         ],
       ),
@@ -229,12 +362,14 @@ class _WifiHomeScreenState extends State<WifiHomeScreen> {
         children: [
           Icon(icon, color: Colors.cyanAccent, size: 22),
           const SizedBox(width: 18),
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(title, style: const TextStyle(color: Colors.grey, fontSize: 10)),
-              Text(value, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
-            ],
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(title, style: const TextStyle(color: Colors.grey, fontSize: 10)),
+                Text(value, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14), overflow: TextOverflow.ellipsis),
+              ],
+            ),
           )
         ],
       ),
